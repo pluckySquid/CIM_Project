@@ -1,94 +1,158 @@
 import xml.etree.ElementTree as ET
+import os
 
-def extract_equipments_from_xml(xml_file):
+def parse_sql_schema(schema_file):
     """
-    Parse the XML and return a list of dictionaries, 
-    each representing an Equipment object with
-    keys: 'mRID', 'name', 'description', 'inService' (or more as needed).
+    Parses the SQL schema file to extract table names and their columns.
     """
-    # Adjust the namespace dict to match your actual XML:
-    ns = {'cim': 'http://iec.ch/TC57/2013/CIM-schema-cim16#'}
+    tables = {}
+    current_table = None
 
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
+    with open(schema_file, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if line.startswith("CREATE TABLE"):
+                # Extract table name
+                parts = line.split('"')
+                if len(parts) >= 2:
+                    current_table = parts[1]
+                    tables[current_table] = []
+                else:
+                    print(f"Warning: Could not parse table name in line: {line}")
+            elif current_table and line.startswith('"'):
+                # Extract column name
+                parts = line.split('"')
+                if len(parts) >= 2:
+                    column_name = parts[1]
+                    tables[current_table].append(column_name)
+                else:
+                    print(f"Warning: Could not parse column name in line: {line}")
+            elif line.startswith(");"):
+                # End of table definition
+                current_table = None
 
-    equipment_data_list = []
+    return tables
 
-    # Find all Equipment elements (adjust the path as needed)
-    for eq in root.findall('.//cim:Equipment', ns):
-        # Extract mRID
-        mRID_elem = eq.find('cim:IdentifiedObject.mRID', ns)
-        mRID = mRID_elem.text if mRID_elem is not None else ''
-
-        # Extract name
-        name_elem = eq.find('cim:IdentifiedObject.name', ns)
-        name = name_elem.text if name_elem is not None else ''
-
-        # Extract description
-        desc_elem = eq.find('cim:IdentifiedObject.description', ns)
-        description = desc_elem.text if desc_elem is not None else ''
-
-        # Extract inService (true/false)
-        in_service_elem = eq.find('cim:Equipment.inService', ns)
-        in_service_str = in_service_elem.text if in_service_elem is not None else ''
-        # Convert string to a more convenient format, e.g. 'Active' or 'Inactive'
-        status = 'Active' if in_service_str.lower() == 'true' else 'Inactive'
-
-        # Build a dict for this equipment
-        eq_dict = {
-            'mRID': mRID,
-            'NAME': name,
-            'DESCRIPTION': description,
-            'STATUS': status
-        }
-
-        equipment_data_list.append(eq_dict)
-
-    return equipment_data_list
-
-def fill_sql_from_xml(xml_file, sql_template_file, output_sql_file):
+def extract_data_from_xml(xml_file, tables):
     """
-    Read the XML to extract data, then read the SQL template file line by line
-    and fill placeholders for each piece of equipment data.
-    
-    Writes all expanded SQL lines to 'output_sql_file'.
+    Parses the XML file and extracts data for the specified tables.
     """
+    # Define namespaces
+    namespaces = {
+        'cim': 'http://iec.ch/TC57/2006/CIM-schema-cim10#',
+        'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+        'etx': 'http://www.ercot.com/CIM11R0/2008/2.0/extension#',
+        'spc': 'http://www.siemens-ptd/SHIMM1.0#'
+    }
 
-    # 1. Extract a list of equipment data from the XML
-    equipment_data_list = extract_equipments_from_xml(xml_file)
+    data = {table: [] for table in tables}
 
-    # 2. Read the entire SQL file as a list of lines
-    with open(sql_template_file, 'r', encoding='utf-8') as f:
-        sql_lines = f.readlines()
-
-    # 3. Open output file for writing
-    with open(output_sql_file, 'w', encoding='utf-8') as out:
+    # Initialize parser
+    context = ET.iterparse(xml_file, events=("end",))
+    for event, elem in context:
+        # Get the tag without namespace
+        tag = elem.tag.split('}')[-1]
         
-        # For each piece of equipment data, we replicate the lines that contain placeholders
-        for eq_data in equipment_data_list:
-            # We loop over each line in the original SQL
-            # If the line contains placeholders, we replace them with eq_data
-            for line in sql_lines:
-                new_line = line
+        if tag in tables:
+            row = {}
+            # Extract mRID from rdf:ID attribute
+            mRID = elem.attrib.get(f'{{{namespaces["rdf"]}}}ID', '').strip()
+            row['mRID'] = mRID if mRID else 'NULL'
 
-                # Example placeholders: {mRID}, {NAME}, {DESCRIPTION}, {STATUS}
-                # Make sure the placeholders match what's in your SQL file
-                new_line = new_line.replace('{mRID}', eq_data['mRID'])
-                new_line = new_line.replace('{NAME}', eq_data['NAME'])
-                new_line = new_line.replace('{DESCRIPTION}', eq_data['DESCRIPTION'])
-                new_line = new_line.replace('{STATUS}', eq_data['STATUS'])
+            # Extract value
+            value_elem = elem.find('cim:AnalogLimit.value', namespaces)
+            if value_elem is not None and value_elem.text:
+                try:
+                    value = float(value_elem.text.strip())
+                    row['value'] = value
+                except ValueError:
+                    print(f"Error: Invalid value '{value_elem.text}' for mRID {mRID}. Setting to NULL.")
+                    row['value'] = None
+            else:
+                print(f"Warning: 'value' element missing for mRID {mRID}. Setting to NULL.")
+                row['value'] = None
 
-                # Write the updated line
-                out.write(new_line)
-            
-            # Optionally add a blank line or separator between each set
-            out.write("\n-- End of block for Equipment: " + eq_data['mRID'] + "\n\n")
+            # Extract LimitSet
+            limit_set_elem = elem.find('cim:AnalogLimit.LimitSet', namespaces)
+            if limit_set_elem is not None:
+                limit_set_resource = limit_set_elem.attrib.get(f'{{{namespaces["rdf"]}}}resource', '').strip()
+                if '#' in limit_set_resource:
+                    limit_set = limit_set_resource.split('#')[-1]
+                else:
+                    limit_set = limit_set_resource
+                row['LimitSet'] = limit_set if limit_set else 'NULL'
+            else:
+                print(f"Warning: 'LimitSet' element missing for mRID {mRID}. Setting to NULL.")
+                row['LimitSet'] = 'NULL'
+
+            # Debug: Print the extracted row
+            print(f"Extracted Row: {row}")
+
+            # Append to data
+            data[tag].append(row)
+
+            # Clear the element to save memory
+            elem.clear()
+
+    return data
+
+def generate_sql_insert_statements(data, output_file):
+    """
+    Generates SQL INSERT statements from the extracted data.
+    """
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for table, rows in data.items():
+            for row in rows:
+                columns = ', '.join([f'"{col}"' for col in row.keys()])
+                values = []
+                for col, val in row.items():
+                    if val is None:
+                        values.append("NULL")
+                    elif isinstance(val, (int, float)):
+                        values.append(f"{val}")
+                    else:
+                        # Escape single quotes in strings
+                        escaped_val = val.replace("'", "''")
+                        values.append(f"'{escaped_val}'")
+                values_str = ', '.join(values)
+                insert_stmt = f'INSERT INTO "{table}" ({columns}) VALUES ({values_str});\n'
+                
+                # Debug: Print the SQL statement
+                print(f"Generated SQL: {insert_stmt.strip()}")
+                
+                # Write to file
+                f.write(insert_stmt)
+
+def main():
+    # Define file paths
+    sql_schema_file = "TestProfile.sql"   # Path to your SQL schema
+    xml_file = "test.xml"                 # Path to your XML file
+    output_sql_file = "output_filled.sql" # Path for the generated SQL
+    
+    # Check if files exist
+    if not os.path.isfile(sql_schema_file):
+        print(f"Error: SQL schema file '{sql_schema_file}' not found.")
+        return
+    if not os.path.isfile(xml_file):
+        print(f"Error: XML file '{xml_file}' not found.")
+        return
+
+    # Parse the SQL schema
+    print("Parsing SQL schema...")
+    tables = parse_sql_schema(sql_schema_file)
+    print("Parsed SQL schema tables and columns:")
+    for table, columns in tables.items():
+        print(f"  Table: {table}, Columns: {columns}")
+
+    # Extract data from XML
+    print("\nExtracting data from XML...")
+    data = extract_data_from_xml(xml_file, tables)
+
+    # Generate SQL INSERT statements
+    print("\nGenerating SQL INSERT statements...")
+    generate_sql_insert_statements(data, output_sql_file)
+
+    print(f"\nSQL INSERT statements have been written to '{output_sql_file}'.")
 
 if __name__ == "__main__":
-    # Example usage:
-    xml_file = "NMMS_Model_CIM_Sep_ML1_1_09122023.xml"
-    sql_template_file = "TestProfile.sql"
-    output_sql_file = "output_filled.sql"
-
-    fill_sql_from_xml(xml_file, sql_template_file, output_sql_file)
-    print(f"Done! Populated SQL is in {output_sql_file}")
+    main()

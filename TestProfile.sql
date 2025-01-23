@@ -113,6 +113,29 @@ CREATE TABLE "ACLineSegment"
     "WireSpacingInfo"CHAR VARYING(30)
 );
 
+-- Represents a single wire of an alternating current line segment.
+CREATE TABLE "ACLineSegmentPhase"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+);
+
+-- Limit values for Analog measurements.
+CREATE TABLE "AnalogLimit"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE,
+    -- The value to supervise against.
+    "value" DOUBLE PRECISION,
+    -- The set of limits.
+    "LimitSet"CHAR VARYING(30)
+);
+
+-- An AnalogLimitSet specifies a set of Limits that are associated with an
+-- Analog measurement.
+CREATE TABLE "AnalogLimitSet"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+);
+
 -- Tangible resource of the utility, including power system equipment, various
 -- end devices, cabinets, buildings, etc. For electrical network equipment,
 -- the role of the asset is defined through PowerSystemResource and its subclasses,
@@ -148,6 +171,16 @@ CREATE TABLE "ChangeSetMember"
     "mRID" CHAR VARYING(30) NOT NULL UNIQUE
 );
 
+-- A Clamp is a galvanic connection at a line segment where other equipment
+-- is connected. A Clamp does not cut the line segment.
+-- A Clamp is ConductingEquipment and has one Terminal with an associated
+-- ConnectivityNode. Any other ConductingEquipment can be connected to the
+-- Clamp ConnectivityNode.
+CREATE TABLE "Clamp"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+);
+
 -- Safety document used to authorise work on conducting equipment in the field.
 -- Tagged equipment is not allowed to be operated.
 CREATE TABLE "ClearanceDocument"
@@ -175,6 +208,25 @@ CREATE TABLE "ContingencyEquipment"
 CREATE TABLE "Control"
 (
     "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+);
+
+-- A cut separates a line segment into two parts. The cut appears as a switch
+-- inserted between these two parts and connects them together. As the cut
+-- is normally open there is no galvanic connection between the two line segment
+-- parts. But it is possible to close the cut to get galvanic connection.
+-- The cut terminals are oriented towards the line segment terminals with
+-- the same sequence number. Hence the cut terminal with sequence number equal
+-- to 1 is oriented to the line segment's terminal with sequence number equal
+-- to 1.
+-- The cut terminals also act as connection points for jumpers and other equipment,
+-- e.g. a mobile generator. To enable this, connectivity nodes are placed
+-- at the cut terminals. Once the connectivity nodes are in place any conducting
+-- equipment can be connected at them.
+CREATE TABLE "Cut"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE,
+    -- The line segment to which the cut is applied.
+    "ACLineSegment"CHAR VARYING(30)
 );
 
 -- An object that defines one or more points in a given space. This object
@@ -241,7 +293,11 @@ CREATE TABLE "EquipmentUnavailabilitySchedule"
 -- modelled (for example, a tree falling on a line).
 CREATE TABLE "Fault"
 (
-    "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE,
+    -- Location of this fault.
+    "Location"CHAR VARYING(30),
+    -- Outage associated with this fault.
+    "Outage"CHAR VARYING(30)
 );
 
 -- An arbitrary switching step.
@@ -274,6 +330,12 @@ CREATE TABLE "JumperAction"
 -- operational limits with the same calculation form that apply to a piece
 -- of equipment..
 CREATE TABLE "LimitDependency"
+(
+    "mRID" CHAR VARYING(30) NOT NULL UNIQUE
+);
+
+-- A fault that occurs on an AC line segment at some point along the length.
+CREATE TABLE "LineFault"
 (
     "mRID" CHAR VARYING(30) NOT NULL UNIQUE
 );
@@ -539,7 +601,17 @@ ALTER TABLE "ACLineSegment" ADD FOREIGN KEY ( "PSRType" ) REFERENCES "PSRType" (
 -- association constraint
 ALTER TABLE "ACLineSegment" ADD FOREIGN KEY ( "WireSpacingInfo" ) REFERENCES "WireSpacingInfo" ( "mRID" );
 -- association constraint
+ALTER TABLE "AnalogLimit" ADD FOREIGN KEY ( "LimitSet" ) REFERENCES "AnalogLimitSet" ( "mRID" );
+-- association constraint
+ALTER TABLE "Cut" ADD FOREIGN KEY ( "ACLineSegment" ) REFERENCES "ACLineSegment" ( "mRID" );
+-- association constraint
 ALTER TABLE "Equipment" ADD FOREIGN KEY ( "EquipmentContainer" ) REFERENCES "EquipmentContainer" ( "mRID" );
+-- association constraint
+ALTER TABLE "Fault" ADD FOREIGN KEY ( "Location" ) REFERENCES "Location" ( "mRID" );
+-- association constraint
+ALTER TABLE "Fault" ADD FOREIGN KEY ( "Outage" ) REFERENCES "Outage" ( "mRID" );
+-- subclass-superclass constraint
+ALTER TABLE "LineFault" ADD FOREIGN KEY ( "mRID" ) REFERENCES "Fault" ( "mRID" );
 -- subclass-superclass constraint
 ALTER TABLE "ProtectionEquipment" ADD FOREIGN KEY ( "mRID" ) REFERENCES "Equipment" ( "mRID" );
 -- subclass-superclass constraint
