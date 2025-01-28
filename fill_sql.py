@@ -55,13 +55,17 @@ def parse_sql_schema(schema_file):
                 # Extract column names and FOREIGN KEY constraints
                 for col_line in current_statement_lines:
                     col_line_stripped = col_line.strip()
-                    # Match column definitions: "columnName" DATA_TYPE ...
-                    col_match = re.match(r'^"([^"]+)"\s+([\w\s]+)', col_line_stripped)
+                    # Match column definitions, allowing dots in column names
+                    col_match = re.match(r'^"([^"]+)"\s*([\w.\s()]+)', col_line_stripped)
                     if col_match:
                         column_name = col_match.group(1)
                         tables[current_table].append(column_name)
                     # Match FOREIGN KEY constraints
-                    fk_match = re.match(r'^FOREIGN KEY\s*\(([^)]+)\)\s*REFERENCES\s+"([^"]+)"\s*\(([^)]+)\)', col_line_stripped, re.IGNORECASE)
+                    fk_match = re.match(
+                        r'^FOREIGN KEY\s*\(([^)]+)\)\s*REFERENCES\s+"([^"]+)"\s*\(([^)]+)\)',
+                        col_line_stripped,
+                        re.IGNORECASE
+                    )
                     if fk_match:
                         fk_columns = fk_match.group(1).strip()
                         ref_table = fk_match.group(2).strip()
@@ -69,11 +73,6 @@ def parse_sql_schema(schema_file):
                         foreign_keys.append((fk_columns, ref_table, ref_columns))
 
                 # Modify the CREATE TABLE statement for SQLite
-                # SQLite requires FOREIGN KEY constraints to be within the table definition
-                # and does not support certain syntax variations.
-                # We'll reconstruct the CREATE TABLE statement accordingly.
-
-                # Remove existing FOREIGN KEY lines
                 adjusted_statement_lines = []
                 for col_line in current_statement_lines:
                     if not re.match(r'^FOREIGN KEY', col_line.strip(), re.IGNORECASE):
@@ -87,9 +86,11 @@ def parse_sql_schema(schema_file):
                     fk_constraints = []
                     for fk in foreign_keys:
                         fk_columns, ref_table, ref_columns = fk
-                        fk_constraints.append(f'    FOREIGN KEY ({fk_columns}) REFERENCES "{ref_table}" ({ref_columns})')
-                    # Insert the FOREIGN KEY constraints before the closing parenthesis
-                    adjusted_statement = adjusted_statement.rstrip(");") + ",\n" + ",\n".join(fk_constraints) + "\n);"
+                        fk_constraints.append(
+                            f'    FOREIGN KEY ({fk_columns}) REFERENCES "{ref_table}" ({ref_columns})'
+                        )
+                    adjusted_statement = adjusted_statement.rstrip(");") \
+                        + ",\n" + ",\n".join(fk_constraints) + "\n);"
 
                 create_statements.append(adjusted_statement)
 
@@ -102,6 +103,7 @@ def parse_sql_schema(schema_file):
     # Combine all adjusted CREATE TABLE statements into a single script
     create_script = "\n".join(create_statements)
     return tables, create_script
+
 
 def create_sqlite_db(db_file, create_script):
     """
@@ -137,9 +139,17 @@ def create_sqlite_db(db_file, create_script):
 
     return conn
 
+
 def extract_data_from_xml(xml_file, tables):
     """
     Parses the XML file and extracts data for the specified tables.
+
+    Args:
+        xml_file (str): Path to the XML file.
+        tables (dict): Dictionary mapping table names to column lists.
+
+    Returns:
+        data (dict): Dictionary mapping table names to lists of row dictionaries.
     """
     # Define namespaces
     namespaces = {
@@ -163,56 +173,39 @@ def extract_data_from_xml(xml_file, tables):
             mRID = elem.attrib.get(f'{{{namespaces["rdf"]}}}ID', '').strip()
             row['mRID'] = mRID if mRID else None  # Use None for NULL
 
-            # Extract value
-            value_elem = elem.find('cim:AnalogLimit.value', namespaces)
-            if value_elem is not None and value_elem.text:
-                try:
-                    value = float(value_elem.text.strip())
-                    row['value'] = value
-                except ValueError:
-                    print(f"Error: Invalid value '{value_elem.text}' for mRID {mRID}. Setting to NULL.")
-                    row['value'] = None
-            else:
-                print(f"Warning: 'value' element missing for mRID {mRID}. Setting to NULL.")
-                row['value'] = None
+            # Iterate through all child elements to extract data
+            for child in elem:
+                child_tag = child.tag.split('}')[-1]
+                child_text = child.text.strip() if child.text else None
 
-            # Extract LimitSet
-            limit_set_elem = elem.find('cim:AnalogLimit.LimitSet', namespaces)
-            if limit_set_elem is not None:
-                limit_set_resource = limit_set_elem.attrib.get(f'{{{namespaces["rdf"]}}}resource', '').strip()
-                if '#' in limit_set_resource:
-                    limit_set = limit_set_resource.split('#')[-1]
+                # Handle references (attributes with resource)
+                if child.tag.startswith(f'{{{namespaces["rdf"]}}}resource'):
+                    ref_resource = child.attrib.get(f'{{{namespaces["rdf"]}}}resource', '').strip()
+                    if '#' in ref_resource:
+                        ref = ref_resource.split('#')[-1]
+                    else:
+                        ref = ref_resource
+                    row[child_tag] = ref if ref else None
                 else:
-                    limit_set = limit_set_resource
-                row['LimitSet'] = limit_set if limit_set else None
-            else:
-                print(f"Warning: 'LimitSet' element missing for mRID {mRID}. Setting to NULL.")
-                row['LimitSet'] = None
+                    # Convert numeric values where possible
+                    if child_text:
+                        try:
+                            if '.' in child_text:
+                                row[child_tag] = float(child_text)
+                            else:
+                                row[child_tag] = int(child_text)
+                        except ValueError:
+                            row[child_tag] = child_text
+                    else:
+                        row[child_tag] = None
 
-            # Handle all other columns generically
+            # Handle all other columns that might not be present in the XML
             for col in tables[tag]:
-                if col in ("mRID", "value", "LimitSet"):
-                    continue  # Already handled
-
-                # Attempt to read from attribute
-                val = elem.attrib.get(col)
-                if val is not None and val.strip() != "":
-                    row[col] = val.strip()
-                else:
-                    # Attempt to read from a child element ignoring namespace
-                    child_found = False
-                    for child in elem:
-                        child_local = child.tag.split('}')[-1]
-                        if child_local == col:
-                            text_val = child.text.strip() if child.text else None
-                            row[col] = text_val if text_val else None
-                            child_found = True
-                            break
-                    if not child_found and col not in row:
-                        row[col] = None
+                if col not in row:
+                    row[col] = None  # Set missing columns to NULL
 
             # Debug: Print the extracted row
-            print(f"Extracted Row: {row}")
+            #print(f"Extracted Row for table '{tag}': {row}")
 
             # Append to data
             data[tag].append(row)
@@ -222,9 +215,14 @@ def extract_data_from_xml(xml_file, tables):
 
     return data
 
+
 def generate_sql_insert_statements(data, output_file):
     """
     Generates SQL INSERT statements from the extracted data.
+
+    Args:
+        data (dict): Dictionary mapping table names to lists of row dictionaries.
+        output_file (str): Path to the output SQL file.
     """
     with open(output_file, 'w', encoding='utf-8') as f:
         for table, rows in data.items():
@@ -249,13 +247,37 @@ def generate_sql_insert_statements(data, output_file):
                 # Write to file
                 f.write(insert_stmt)
 
+
 def insert_data_into_db(conn, data):
     """
     Inserts the extracted data into the SQLite database.
+    If a column doesn't exist in the table, this function dynamically
+    adds that column (as TEXT) to allow storing all data.
     """
     cursor = conn.cursor()
-    for table, rows in data.items():
-        for row in rows:
+
+    # Helper function to add a missing column as TEXT
+    def ensure_column_exists(table_name, column_name):
+        try:
+            cursor.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" TEXT;')
+            print(f'Added missing column "{column_name}" as TEXT in table "{table_name}"')
+        except sqlite3.OperationalError as e:
+            # If it's "duplicate column name", ignore
+            if "duplicate column name" not in str(e).lower():
+                print(f"Error adding column '{column_name}' to '{table_name}': {e}")
+
+    for table, rows_ in data.items():
+        # Retrieve existing columns from PRAGMA table_info
+        cursor.execute(f'PRAGMA table_info("{table}");')
+        existing_cols = [row_[1] for row_ in cursor.fetchall()]
+
+        for row in rows_:
+            # Ensure all columns exist in the DB; if not, create them as TEXT
+            for col in row.keys():
+                if col not in existing_cols:
+                    ensure_column_exists(table, col)
+                    existing_cols.append(col)
+
             columns = ', '.join([f'"{col}"' for col in row.keys()])
             placeholders = ', '.join(['?' for _ in row.keys()])
             insert_sql = f'INSERT INTO "{table}" ({columns}) VALUES ({placeholders})'
@@ -276,10 +298,12 @@ def insert_data_into_db(conn, data):
     conn.commit()
     print(f"\nAll data inserted into the SQLite database successfully.\n")
 
+
 def main():
     # Define file paths
     sql_schema_file = "TestProfile.sql"    # Path to your SQL schema
     xml_file = "test.xml"                  # Path to your XML file
+    xml_file = "NMMS_Model_CIM_Sep_ML1_1_09122023.xml"
     output_sql_file = "output_filled.sql"  # Path for the generated SQL
     db_file = "output.db"                  # SQLite database file to create
 
@@ -325,6 +349,7 @@ def main():
     conn.close()
     print("\nDatabase connection closed.")
     print("\nProcess completed successfully.")
+
 
 if __name__ == "__main__":
     main()
