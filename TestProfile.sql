@@ -103,7 +103,7 @@ CREATE TABLE "ACLineSegment"
     "Location"CHAR VARYING(30),
     -- The outage that is isolated by the outage isolation equipment.
     "Outage"CHAR VARYING(30),
-    -- Per-length impedance of this line segment.
+    -- Per-length NormallyInServiceimpedance of this line segment.
     "PerLengthImpedance"CHAR VARYING(30),
     -- The single CIM data object in the appropriate dataset context.
     "PropertiesCIMDataObject"CHAR VARYING(30),
